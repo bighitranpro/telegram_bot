@@ -1,0 +1,45 @@
+name: Keep Telegram Bot Alive (Bi Ads)
+
+on:
+  workflow_dispatch:          # chạy thủ công
+  schedule:
+    - cron: "*/25 * * * *"    # tự chạy mỗi 25 phút (tối thiểu 5')
+
+concurrency:
+  group: "telegram-bot"       # đảm bảo chỉ có 1 job đang chạy
+  cancel-in-progress: true
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30       # phòng treo; job sẽ dừng nếu quá 30'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build .env
+        run: |
+          echo "PROVIDER=${{ vars.PROVIDER || 'openai' }}" >> .env
+          echo "MODEL=${{ vars.MODEL || 'gpt-4o-mini' }}" >> .env
+          echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> .env
+          if [ "${{ secrets.OPENAI_API_KEY }}" != "" ]; then
+            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+          fi
+          if [ "${{ secrets.OPENROUTER_API_KEY }}" != "" ]; then
+            echo "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}" >> .env
+          fi
+
+      # Trick giữ sống: chạy bot ~24 phút rồi thoát để nhường lượt tiếp theo
+      - name: Run bot ~24 minutes
+        run: |
+          timeout 24m python telegram_bot/telegram_bot.py || true
