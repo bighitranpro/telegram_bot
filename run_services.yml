@@ -42,4 +42,4 @@ jobs:
       # Trick giữ sống: chạy bot ~24 phút rồi thoát để nhường lượt tiếp theo
       - name: Run bot ~24 minutes
         run: |
-          timeout 24m python telegram_bot/telegram_bot.py || true
+          timeout 24m python telegram_bot.py || true
