@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import re
+import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -653,6 +654,20 @@ def comment_matches(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword in lowered for keyword in keywords if keyword)
 
 
+def safe_format_reply_template(template: str, actor_name: str) -> Tuple[bool, str]:
+    formatter = string.Formatter()
+    try:
+        for _, field_name, _, _ in formatter.parse(template):
+            if field_name and field_name != "name":
+                return False, f"Lỗi định dạng mẫu (placeholder {{{field_name}}} không được hỗ trợ)"
+    except ValueError as exc:
+        return False, f"Lỗi định dạng mẫu ({exc})"
+    try:
+        return True, template.format(name=actor_name)
+    except (IndexError, KeyError, ValueError) as exc:
+        return False, f"Lỗi định dạng mẫu ({exc})"
+
+
 async def fb_request(
     session: aiohttp.ClientSession,
     method: str,
@@ -779,19 +794,18 @@ async def process_page_posts(
                 actions_taken.append(f"Chặn người dùng {actor_id}: {'✅' if ok else '❌'} {msg}")
             template = auto.get("message_template")
             if template and actor_id:
-                try:
-                    formatted_message = template.format(name=actor_name)
-                except (IndexError, KeyError, ValueError) as exc:
-                    actions_taken.append(
-                        f"Gửi tin nhắn: ❌ Lỗi định dạng mẫu ({exc})"
-                    )
+                template_ok, formatted_or_error = safe_format_reply_template(
+                    template, actor_name
+                )
+                if not template_ok:
+                    actions_taken.append(f"Gửi tin nhắn: ❌ {formatted_or_error}")
                 else:
                     ok, msg = await fb_request(
                         session,
                         "POST",
                         f"{comment_id}/private_replies",
                         token,
-                        data={"message": formatted_message},
+                        data={"message": formatted_or_error},
                     )
                     actions_taken.append(f"Gửi tin nhắn: {'✅' if ok else '❌'} {msg}")
             summary_lines = [
