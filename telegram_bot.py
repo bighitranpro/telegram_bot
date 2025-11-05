@@ -483,6 +483,10 @@ async def set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await send_reply(update, "⚠️ Trang chưa được lưu.")
             return
         page.setdefault("auto", {})
+        error = validate_reply_template(message)
+        if error:
+            await send_reply(update, f"❌ {error}")
+            return
         page["auto"]["message_template"] = message
         _write_state_locked()
     await send_reply(update, f"✅ Đã cập nhật mẫu tin nhắn cho trang {page_id}.")
@@ -654,14 +658,21 @@ def comment_matches(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword in lowered for keyword in keywords if keyword)
 
 
-def safe_format_reply_template(template: str, actor_name: str) -> Tuple[bool, str]:
+def validate_reply_template(template: str) -> Optional[str]:
     formatter = string.Formatter()
     try:
         for _, field_name, _, _ in formatter.parse(template):
             if field_name and field_name != "name":
-                return False, f"Lỗi định dạng mẫu (placeholder {{{field_name}}} không được hỗ trợ)"
+                return f"Lỗi định dạng mẫu (placeholder {{{field_name}}} không được hỗ trợ)"
     except ValueError as exc:
-        return False, f"Lỗi định dạng mẫu ({exc})"
+        return f"Lỗi định dạng mẫu ({exc})"
+    return None
+
+
+def safe_format_reply_template(template: str, actor_name: str) -> Tuple[bool, str]:
+    error = validate_reply_template(template)
+    if error:
+        return False, error
     try:
         return True, template.format(name=actor_name)
     except (IndexError, KeyError, ValueError) as exc:
@@ -739,8 +750,8 @@ async def process_page_posts(
         last_id_stored = meta.get("last_comment_id")
         stored_ids = meta.get("last_comment_ids") or []
         last_ids: Set[str] = set()
-        if isinstance(stored_ids, list):
-            last_ids.update(filter(None, stored_ids))
+        if isinstance(stored_ids, (list, tuple, set)):
+            last_ids.update(str(item) for item in stored_ids if item)
         if last_id_stored:
             last_ids.add(last_id_stored)
         last_dt = datetime.fromisoformat(last_time_stored) if last_time_stored else None
