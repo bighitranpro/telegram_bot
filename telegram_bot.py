@@ -7,9 +7,10 @@ import copy
 import json
 import os
 import re
+import string
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import aiohttp
 from dotenv import load_dotenv
@@ -482,6 +483,10 @@ async def set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await send_reply(update, "⚠️ Trang chưa được lưu.")
             return
         page.setdefault("auto", {})
+        error = validate_reply_template(message)
+        if error:
+            await send_reply(update, f"❌ {error}")
+            return
         page["auto"]["message_template"] = message
         _write_state_locked()
     await send_reply(update, f"✅ Đã cập nhật mẫu tin nhắn cho trang {page_id}.")
@@ -653,6 +658,27 @@ def comment_matches(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword in lowered for keyword in keywords if keyword)
 
 
+def validate_reply_template(template: str) -> Optional[str]:
+    formatter = string.Formatter()
+    try:
+        for _, field_name, _, _ in formatter.parse(template):
+            if field_name and field_name != "name":
+                return f"Lỗi định dạng mẫu (placeholder {{{field_name}}} không được hỗ trợ)"
+    except ValueError as exc:
+        return f"Lỗi định dạng mẫu ({exc})"
+    return None
+
+
+def safe_format_reply_template(template: str, actor_name: str) -> Tuple[bool, str]:
+    error = validate_reply_template(template)
+    if error:
+        return False, error
+    try:
+        return True, template.format(name=actor_name)
+    except (IndexError, KeyError, ValueError) as exc:
+        return False, f"Lỗi định dạng mẫu ({exc})"
+
+
 async def fb_request(
     session: aiohttp.ClientSession,
     method: str,
@@ -722,16 +748,29 @@ async def process_page_posts(
             continue
         last_time_stored = meta.get("last_comment_time")
         last_id_stored = meta.get("last_comment_id")
+        stored_ids = meta.get("last_comment_ids") or []
+        last_ids: Set[str] = set()
+        if isinstance(stored_ids, (list, tuple, set)):
+            last_ids.update(str(item) for item in stored_ids if item)
+        if last_id_stored:
+            last_ids.add(last_id_stored)
         last_dt = datetime.fromisoformat(last_time_stored) if last_time_stored else None
         latest_dt = last_dt
         latest_id = last_id_stored
+        latest_ids: Set[str] = set(last_ids)
         for comment in reversed(comments):
             created = parse_fb_time(comment.get("created_time", ""))
             if created is None:
                 continue
             if last_dt and created < last_dt:
                 continue
-            if last_dt and created == last_dt and comment.get("id") == last_id_stored:
+            comment_id = comment.get("id")
+            if (
+                last_dt
+                and created == last_dt
+                and comment_id
+                and comment_id in last_ids
+            ):
                 continue
             text = comment.get("message") or ""
             actor = comment.get("from") or {}
@@ -739,7 +778,6 @@ async def process_page_posts(
             actor_id = actor.get("id")
             actions_taken: List[str] = []
             deleted = False
-            comment_id = comment.get("id")
             if comment_matches(text, auto.get("delete_keywords", [])):
                 ok, msg = await fb_request(session, "DELETE", comment_id, token)
                 actions_taken.append(f"Xoá bình luận: {'✅' if ok else '❌'} {msg}")
@@ -767,14 +805,20 @@ async def process_page_posts(
                 actions_taken.append(f"Chặn người dùng {actor_id}: {'✅' if ok else '❌'} {msg}")
             template = auto.get("message_template")
             if template and actor_id:
-                ok, msg = await fb_request(
-                    session,
-                    "POST",
-                    f"{comment_id}/private_replies",
-                    token,
-                    data={"message": template.format(name=actor_name)},
+                template_ok, formatted_or_error = safe_format_reply_template(
+                    template, actor_name
                 )
-                actions_taken.append(f"Gửi tin nhắn: {'✅' if ok else '❌'} {msg}")
+                if not template_ok:
+                    actions_taken.append(f"Gửi tin nhắn: ❌ {formatted_or_error}")
+                else:
+                    ok, msg = await fb_request(
+                        session,
+                        "POST",
+                        f"{comment_id}/private_replies",
+                        token,
+                        data={"message": formatted_or_error},
+                    )
+                    actions_taken.append(f"Gửi tin nhắn: {'✅' if ok else '❌'} {msg}")
             summary_lines = [
                 f"💬 Bình luận mới trên {page.get('name', page_id)}",
                 f"• Bài: {post_id}",
@@ -786,14 +830,20 @@ async def process_page_posts(
             else:
                 summary_lines.append("• Chưa có hành động tự động.")
             messages.append("\n".join(summary_lines))
-            if not latest_dt or created > latest_dt or (created == latest_dt and comment_id):
+            if not latest_dt or created > latest_dt:
                 latest_dt = created
+                latest_ids = set()
+            if created == latest_dt and comment_id:
+                latest_ids.add(comment_id)
                 latest_id = comment_id
         if latest_dt:
-            updates[post_id] = {
+            update_payload: Dict[str, Any] = {
                 "last_comment_time": latest_dt.astimezone(timezone.utc).isoformat(),
                 "last_comment_id": latest_id,
             }
+            if latest_ids:
+                update_payload["last_comment_ids"] = sorted(latest_ids)
+            updates[post_id] = update_payload
     return updates, messages
 
 
